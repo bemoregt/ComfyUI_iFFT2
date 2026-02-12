@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from PIL import Image, ImageOps
 from scipy.fft import ifft2, ifftshift
 
 
@@ -10,6 +9,8 @@ class Spectrum2Image:
 
     진폭 스펙트럼 이미지와 위상 스펙트럼 이미지를 입력받아
     2D 역 FFT(iFFT)를 수행하여 원본 이미지를 복원합니다.
+
+    ※ amplitude 값은 Image_Spectrum 노드의 amplitude 값과 반드시 동일해야 합니다.
 
     Image_Spectrum 노드 (bemoregt/ComfyUI_CustomNode_Image2Spectrum) 의
     역연산 노드입니다.
@@ -26,7 +27,11 @@ class Spectrum2Image:
                     "min": 1,
                     "max": 50,
                     "step": 1,
-                    "tooltip": "Image_Spectrum 노드에서 사용한 amplitude 값과 동일하게 맞춰야 합니다."
+                }),
+                "normalize": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "ON (출력 범위 자동 정규화)",
+                    "label_off": "OFF (원본 밝기 그대로)",
                 }),
             },
         }
@@ -36,7 +41,7 @@ class Spectrum2Image:
     FUNCTION = "spectrum_to_image"
     CATEGORY = "image/transform"
 
-    def spectrum_to_image(self, amplitude_spectrum, phase_spectrum, amplitude):
+    def spectrum_to_image(self, amplitude_spectrum, phase_spectrum, amplitude, normalize):
         # 텐서에서 numpy 배열 추출 (배치 첫 번째 요소)
         amp_np = amplitude_spectrum[0].cpu().numpy()  # [H, W] 또는 [H, W, C]
         phase_np = phase_spectrum[0].cpu().numpy()    # [H, W] 또는 [H, W, C]
@@ -50,27 +55,43 @@ class Spectrum2Image:
         # ── 진폭 스펙트럼 역정규화 ──────────────────────────────────────────
         # 정방향: amp_img = amplitude * log1p(|F_shift|) / 255.0
         # 역방향: |F_shift| = expm1(amp_np * 255.0 / amplitude)
-        magnitude = np.expm1(amp_np.astype(np.float64) * 255.0 / amplitude)
+        # ※ amplitude 불일치 시 magnitude가 수천 배 작아져 검정 이미지가 됩니다.
+        exponent = amp_np.astype(np.float64) * 255.0 / amplitude
+        # 오버플로우 방지 (exp(709) ≈ float64 최대값)
+        exponent = np.clip(exponent, 0, 700)
+        magnitude = np.expm1(exponent)
+        # NaN / Inf 방어
+        magnitude = np.nan_to_num(magnitude, nan=0.0, posinf=0.0, neginf=0.0)
 
         # ── 위상 스펙트럼 역정규화 ──────────────────────────────────────────
         # 정방향: phase_img = (phase + π) / (2π)   →  [0, 1]
         # 역방향: phase = phase_img * 2π - π        →  [-π, π]
         phase_rad = phase_np.astype(np.float64) * 2.0 * np.pi - np.pi
 
-        # ── 복소 주파수 도메인 재구성 ────────────────────────────────────────
+        # ── 복소 주파수 도메인 재구성 ─────────────────────────────────────
         f_shift = magnitude * np.exp(1j * phase_rad)
 
-        # ── 역 FFT ──────────────────────────────────────────────────────────
+        # ── 역 FFT ────────────────────────────────────────────────────────
         f_transform = ifftshift(f_shift)
         reconstructed = np.real(ifft2(f_transform))
 
-        # ── 이미지 후처리 ────────────────────────────────────────────────────
-        # 값 범위 클립 후 [0, 1] float32 변환
-        reconstructed = np.clip(reconstructed, 0, 255).astype(np.float32) / 255.0
+        # ── 이미지 후처리 ─────────────────────────────────────────────────
+        if normalize:
+            # 출력 범위 자동 정규화: amplitude 불일치가 있어도 이미지가 보임
+            r_min, r_max = reconstructed.min(), reconstructed.max()
+            if r_max > r_min:
+                reconstructed = (reconstructed - r_min) / (r_max - r_min)
+            else:
+                reconstructed = np.zeros_like(reconstructed)
+        else:
+            # 원본 밝기 기준: [0, 255] → [0, 1]
+            reconstructed = np.clip(reconstructed, 0, 255) / 255.0
+
+        result = reconstructed.astype(np.float32)
 
         # ComfyUI IMAGE 포맷: [B, H, W, C] (RGB 3채널로 확장)
-        result_rgb = np.stack([reconstructed] * 3, axis=-1)  # [H, W, 3]
-        result_tensor = torch.from_numpy(result_rgb)[None,]  # [1, H, W, 3]
+        result_rgb = np.stack([result] * 3, axis=-1)          # [H, W, 3]
+        result_tensor = torch.from_numpy(result_rgb)[None,]   # [1, H, W, 3]
 
         return (result_tensor,)
 
