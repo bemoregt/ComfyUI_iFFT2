@@ -2,6 +2,8 @@
 
 진폭 스펙트럼 이미지와 위상 스펙트럼 이미지를 입력받아 2D 역 FFT(iFFT)로 원본 이미지를 복원하는 ComfyUI 커스텀 노드입니다.
 
+![이미지 스펙트럼 예시](image2spectrum.png)
+
 [bemoregt/ComfyUI_CustomNode_Image2Spectrum](https://github.com/bemoregt/ComfyUI_CustomNode_Image2Spectrum) 의 **역연산 노드**입니다.
 
 ---
